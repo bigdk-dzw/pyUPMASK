@@ -1,43 +1,85 @@
-
-import warnings
 import numpy as np
 from scipy.stats import gaussian_kde
 
 
-def probs(xy, data, cl_probs, Nst_max=5000):
+def adaptive_kde(X, X_eval=None, alpha=0.5, base_h0=None):
+    """Adaptive KDE using a pilot estimate and local bandwidth factors."""
+    X = np.asarray(X, dtype=float)
+    if X_eval is None:
+        X_eval = X
+    else:
+        X_eval = np.asarray(X_eval, dtype=float)
+
+    N, D = X.shape
+    M = X_eval.shape[0]
+
+    if np.all(X == X[0]):
+        return np.ones(M)
+
+    pilot_kde = gaussian_kde(X.T, bw_method=base_h0)
+    pilot_density = pilot_kde.evaluate(X.T)
+    pilot_density = np.clip(pilot_density, a_min=1e-12, a_max=None)
+
+    g = np.exp(np.mean(np.log(pilot_density)))
+    lambda_i = (pilot_density / g) ** (-alpha)
+
+    if base_h0 is None:
+        h0 = pilot_kde.factor * np.mean(np.std(X, axis=0))
+    else:
+        h0 = float(base_h0)
+
+    if not np.isfinite(h0) or h0 <= 0:
+        h0 = 1e-4
+
+    h_i = np.maximum(h0 * lambda_i, 1e-8)
+    densities = np.zeros(M)
+    norm_const = (2 * np.pi) ** (D / 2.0)
+
+    for i in range(M):
+        diff = X_eval[i] - X
+        dist_sq = np.sum(diff ** 2, axis=1)
+        kernel_vals = np.exp(-dist_sq / (2 * h_i ** 2)) / (
+            (h_i ** D) * norm_const)
+        densities[i] = np.mean(kernel_vals)
+
+    return densities
+
+
+def probs(xy, data, cl_probs):
     """
-    Assign probabilities to all stars after generating the KDEs for field and
-    member stars. The Cluster probability is obtained applying the formula for
-    two mutually exclusive and exhaustive hypotheses.
+    Experimental pyUPMASK bridge.
+
+    Build adaptive spatial KDEs in normalized (x,y) using the current
+    member/non-member split and combine the spatial probability with the
+    upstream pyUPMASK membership probability multiplicatively.
+
+    This intentionally preserves the submitted experimental rule
+    P_final = P_upstream * P_spatial so it can be tested as an ablation.
     """
+    xy = np.asarray(xy, dtype=float)
+    cl_probs = np.asarray(cl_probs, dtype=float)
 
-    # Combine coordinates with the rest of the features.
-    all_data = np.concatenate([xy.T, data.T]).T
-    # Split into the two populations.
-    field_stars = all_data[cl_probs == 0.]
-    membs_stars = all_data[cl_probs == 1.]
+    if cl_probs.size == 0:
+        return cl_probs
 
-    # To improve the performance, cap the number of stars using a random
-    # selection of 'Nf_max' elements.
-    if field_stars.shape[0] > Nst_max:
-        idxs = np.arange(field_stars.shape[0])
-        np.random.shuffle(idxs)
-        field_stars = field_stars[idxs[:Nst_max]]
+    threshold = np.median(cl_probs)
+    memb_mask = cl_probs >= threshold
+    non_memb_mask = ~memb_mask
 
-    # Evaluate all stars in both KDEs
+    if np.sum(memb_mask) < 3 or np.sum(non_memb_mask) < 3:
+        return cl_probs
+
+    xy_memb = xy[memb_mask]
+    xy_non = xy[non_memb_mask]
+
     try:
-        kd_field = gaussian_kde(field_stars.T)
-        kd_memb = gaussian_kde(membs_stars.T)
-
-        L_memb = kd_memb.evaluate(all_data.T)
-        L_field = kd_field.evaluate(all_data.T)
-
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            # Probabilities for mutually exclusive and exhaustive hypotheses
-            cl_probs = 1. / (1. + (L_field / L_memb))
-
+        dens_memb = adaptive_kde(xy_memb, X_eval=xy)
+        dens_non = adaptive_kde(xy_non, X_eval=xy)
     except (np.linalg.LinAlgError, ValueError):
-        print("WARNING: Could not perform KDE probabilities estimation")
+        return cl_probs
 
-    return cl_probs
+    total_dens = dens_memb + dens_non + 1e-12
+    kde_prob_spatial = dens_memb / total_dens
+
+    final_probs = cl_probs * kde_prob_spatial
+    return np.clip(final_probs, 0.0, 1.0)
