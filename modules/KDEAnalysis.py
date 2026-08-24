@@ -49,12 +49,8 @@ def probs(xy, data, cl_probs):
     """
     Experimental pyUPMASK bridge.
 
-    Build adaptive spatial KDEs in normalized (x,y) using the current
-    member/non-member split and combine the spatial probability with the
-    upstream pyUPMASK membership probability multiplicatively.
-
-    This intentionally preserves the submitted experimental rule
-    P_final = P_upstream * P_spatial so it can be tested as an ablation.
+    Adaptive KDEs are evaluated only in normalized (x,y). The submitted
+    experimental fusion rule P_final = P_upstream * P_spatial is preserved.
     """
     xy = np.asarray(xy, dtype=float)
     cl_probs = np.asarray(cl_probs, dtype=float)
@@ -62,9 +58,16 @@ def probs(xy, data, cl_probs):
     if cl_probs.size == 0:
         return cl_probs
 
-    threshold = np.median(cl_probs)
+    # The submitted median split is retained, but the median is computed on
+    # positive upstream probabilities. Otherwise, when field stars dominate,
+    # median(cl_probs)==0 would incorrectly put every zero-probability field
+    # star into the member KDE and disable the experiment entirely.
+    positive = cl_probs[cl_probs > 0]
+    if positive.size < 3:
+        return cl_probs
+    threshold = np.median(positive)
     memb_mask = cl_probs >= threshold
-    non_memb_mask = ~memb_mask
+    non_memb_mask = cl_probs < threshold
 
     if np.sum(memb_mask) < 3 or np.sum(non_memb_mask) < 3:
         return cl_probs
